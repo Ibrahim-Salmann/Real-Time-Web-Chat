@@ -8,9 +8,72 @@ service: Real-Time-Web-Chat
 provider:
   name: aws
   runtime: nodejs20.x
+  environment:
+    WSSAPIGATEWAYENDPOINT:
+      Fn::Join:
+        - ""
+        - - Ref: WebsocketsApi
+          - ".execute-api."
+          - Ref: AWS::Region
+          - ".amazonaws.com/${sls:stage}"
   # Uncomment to easily set up a custom domain. Read the docs for more details:
   # https://www.serverless.com/framework/docs/providers/aws/guide/domains
   # domain: api.example.com
+
+
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - "dynamodb:PutItem"
+            - "dynamodb:GetItem"
+            - "dynamodb:DeleteItem"
+            - "dynamodb:Scan"
+          Resource:
+            - { "Fn::GetAtt": ["ClientsTable", "Arn"] }
+        - Effect: Allow
+          Action:
+            - "dynamodb:Query"
+          Resource:
+            Fn::Join:
+              - "/"
+              - - { "Fn::GetAtt": ["ClientsTable", "Arn"] }
+                - "index"
+                - "*"
+        - Effect: Allow
+          Action:
+            - "dynamodb:PutItem"
+            - "dynamodb:GetItem"
+            - "dynamodb:DeleteItem"
+            - "dynamodb:Scan"
+          Resource:
+            - { "Fn::GetAtt": ["MessagesTable", "Arn"] }
+        - Effect: Allow
+          Action:
+            - "dynamodb:Query"
+          Resource:
+            Fn::Join:
+              - "/"
+              - - { "Fn::GetAtt": ["MessagesTable", "Arn"] }
+                - "index"
+                - "*"
+        # Permissions for API Gateway Management API to send messages back to clients
+        - Effect: Allow
+          Action:
+            - "execute-api:ManageConnections"
+          Resource:
+            Fn::Join:
+              - ""
+              - - "arn:"
+                - Ref: AWS::Partition
+                - ":execute-api:"
+                - Ref: AWS::Region
+                - ":"
+                - Ref: AWS::AccountId
+                - ":"
+                - Ref: WebsocketsApi # This refers to the implicitly created WebSocket API
+                - "/*"
 
 functions:
   hello:
@@ -19,6 +82,72 @@ functions:
       - httpApi:
           path: /
           method: get
+  websocketHandler:
+    handler: src/handler.handle
+    events:
+      - websocket:
+          route: $connect
+      - websocket:
+          route: $disconnect
+      - websocket:
+          route: getMessages
+      - websocket:
+          route: sendMessage
+      - websocket:
+          route: getClients
+
+plugins:
+  - serverless-plugin-typescript
+
+resources:
+  Resources:
+    ClientsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: Clients
+        BillingMode: PAY_PER_REQUEST # Recommended for unpredictable workloads like chat
+        AttributeDefinitions:
+          - AttributeName: connectionId
+            AttributeType: S
+          - AttributeName: nickname
+            AttributeType: S
+        KeySchema:
+          - AttributeName: connectionId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: NicknameIndex
+            KeySchema:
+              - AttributeName: nickname
+                KeyType: HASH
+            Projection:
+              ProjectionType: "ALL"
+    MessagesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: Messages
+        BillingMode: PAY_PER_REQUEST # Recommended for unpredictable workloads like chat
+        AttributeDefinitions:
+          - AttributeName: messageId
+            AttributeType: S
+          - AttributeName: createdAt
+            AttributeType: N
+          - AttributeName: nicknameToNickname
+            AttributeType: S
+        KeySchema:
+          - AttributeName: messageId
+            KeyType: HASH
+          - AttributeName: createdAt
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: NicknameToNicknameIndex
+            KeySchema:
+              - AttributeName: nicknameToNickname
+                KeyType: HASH
+              - AttributeName: createdAt
+                KeyType: RANGE
+            Projection:
+              ProjectionType: "ALL"
+
 build:
   esbuild:
     bundle: true
