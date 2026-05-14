@@ -7,9 +7,10 @@
 
     // Environment Settings
     // See also https://aka.ms/tsconfig/module
-    "module": "nodenext",
-    "target": "esnext",
-    "types": [],
+    "module": "Node16",
+    "target": "es2020",
+    "moduleResolution": "node16",
+    "types": ["node", "aws-lambda"],
     // For nodejs:
     // "lib": ["esnext"],
     // "types": ["node"],
@@ -34,10 +35,9 @@
 
     // Recommended Options
     "strict": true,
+    "esModuleInterop": true,
     "jsx": "react-jsx",
-    "verbatimModuleSyntax": true,
     "isolatedModules": true,
-    "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
     "skipLibCheck": true,
   }

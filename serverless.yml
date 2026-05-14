@@ -76,14 +76,8 @@ provider:
                 - "/*"
 
 functions:
-  hello:
-    handler: handler.hello
-    events:
-      - httpApi:
-          path: /
-          method: get
   websocketHandler:
-    handler: src/handler.handle
+    handler: handler.handle
     events:
       - websocket:
           route: $connect
@@ -96,8 +90,7 @@ functions:
       - websocket:
           route: getClients
 
-plugins:
-  - serverless-plugin-typescript
+
 
 resources:
   Resources:
@@ -114,6 +107,9 @@ resources:
         KeySchema:
           - AttributeName: connectionId
             KeyType: HASH
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
         GlobalSecondaryIndexes:
           - IndexName: NicknameIndex
             KeySchema:
@@ -147,6 +143,11 @@ resources:
                 KeyType: RANGE
             Projection:
               ProjectionType: "ALL"
+
+    ChatMediaBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-media-${sls:stage}
 
 build:
   esbuild:
