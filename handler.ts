@@ -1,6 +1,6 @@
 import {
-  APIGatewayProxyEvent,
   APIGatewayProxyEventQueryStringParameters,
+  APIGatewayProxyEvent,
   APIGatewayProxyResult,
   Context,
 } from 'aws-lambda';
@@ -285,10 +285,13 @@ const postToConnection = async (connectionId: string, messageBody: string): Prom
 // On disconnect: call with the departed connectionId to skip sending to a dead connection.
 const notifyClientChange = async (excludedConnectionId: string = '') => {
   const clients = await getAllClients();
+  // Sanitize the list to avoid leaking connectionIds to other users
+  const publicClientList = clients.map(c => ({ nickname: c.nickname }));
+
   await Promise.all(clients.map(async (c) => {
     // Skip the excluded connection (stale/disconnected), notify everyone else
     if (excludedConnectionId !== c.connectionId) {
-      await postToConnection(c.connectionId, JSON.stringify({ type: 'clients', value: clients }));
+      await postToConnection(c.connectionId, JSON.stringify({ type: 'clients', value: publicClientList }));
     }
   }));
 };

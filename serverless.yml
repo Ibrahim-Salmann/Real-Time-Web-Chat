@@ -3,16 +3,18 @@ org: ibrahim2003
 # "app" enables Serverless Framework Dashboard features and sharing them with other Services.
 app: e-homing
 # "service" is the name of this project. This will also be added to your AWS resource names.
-service: Real-Time-Web-Chat
+service: real-time-web-chat
 
 provider:
   name: aws
   runtime: nodejs20.x
+  stackName: real-time-web-chat-dev
   environment:
     WSSAPIGATEWAYENDPOINT:
       Fn::Join:
         - ""
-        - - Ref: WebsocketsApi
+        - - "https://"
+          - Ref: WebsocketsApi
           - ".execute-api."
           - Ref: AWS::Region
           - ".amazonaws.com/${sls:stage}"
@@ -146,8 +148,6 @@ resources:
 
     ChatMediaBucket:
       Type: AWS::S3::Bucket
-      Properties:
-        BucketName: ${self:service}-media-${sls:stage}
 
 build:
   esbuild:
