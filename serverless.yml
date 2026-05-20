@@ -8,6 +8,7 @@ service: real-time-web-chat
 provider:
   name: aws
   runtime: nodejs20.x
+  websocketsApiRouteSelectionExpression: '$request.body.action'
   stackName: real-time-web-chat-dev
   environment:
     WSSAPIGATEWAYENDPOINT:
@@ -86,11 +87,13 @@ functions:
       - websocket:
           route: $disconnect
       - websocket:
-          route: getMessages
+          route: $default
       - websocket:
           route: sendMessage
       - websocket:
           route: getClients
+      - websocket:
+          route: getMessages
 
 
 
