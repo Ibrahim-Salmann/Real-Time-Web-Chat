@@ -59,7 +59,9 @@ type GetMessagesBody = {
 const CLIENTS_TABLE_NAME = "Clients";
 const MESSAGES_TABLE_NAME = "Messages";
   
-const docClient = new AWS.DynamoDB.DocumentClient();
+const docClient = new AWS.DynamoDB.DocumentClient({
+  region: process.env.AWS_REGION || 'us-east-1'
+});
 const apiGatewayEndpoint = process.env.WSSAPIGATEWAYENDPOINT;
 if (!apiGatewayEndpoint) {
   throw new Error('WSSAPIGATEWAYENDPOINT environment variable is required');
@@ -209,18 +211,26 @@ const handleConnect = async (
     };
   }
 
-  await docClient.put({
-    TableName: CLIENTS_TABLE_NAME,
-    Item: {
-      connectionId,
-      nickname,
-      ttl: Math.floor(Date.now() / 1000) + (60 * 60 * 24 * 7), // Set TTL to 7 days for automatic cleanup
-    },
-  }).promise();
+  const result = await docClient.put({
+  TableName: CLIENTS_TABLE_NAME,
+  Item: {
+    connectionId,
+    nickname,
+    ttl: Math.floor(Date.now() / 1000) + (60 * 60 * 24 * 7),
+  },
+}).promise();
+
+console.log("CONNECT PUT RESULT:", JSON.stringify(result, null, 2));
+
+console.log("CONNECT SAVED CLIENT:", {
+  connectionId,
+  nickname,
+});
 
   // Notify ALL clients (including the newly connected one) about the updated client list.
-  // This ensures the new client immediately sees other users and others see the new client.
-  await notifyClientChange();
+  // We exclude the current connectionId because API Gateway doesn't allow posting to it
+  // until the $connect handler successfully returns.
+  await notifyClientChange(connectionId);
 
   return {
     statusCode: 200,

@@ -19,6 +19,8 @@ provider:
           - ".execute-api."
           - Ref: AWS::Region
           - ".amazonaws.com/${sls:stage}"
+    CLIENTS_TABLE: Clients
+    MESSAGES_TABLE: Messages
   # Uncomment to easily set up a custom domain. Read the docs for more details:
   # https://www.serverless.com/framework/docs/providers/aws/guide/domains
   # domain: api.example.com
