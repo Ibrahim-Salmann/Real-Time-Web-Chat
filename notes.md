@@ -19,3 +19,9 @@ npx serverless deploy
 wss://o3tx97i0uc.execute-api.us-east-1.amazonaws.com/dev
 
 {"action":"sendMessage","data":{"recipientNickname":"ibrahim","message":"hello"}}
+
+websocat "wss://o3tx97i0uc.execute-api.us-east-1.amazonaws.com/dev?nickname=ali"
+
+{"action":"sendMessage","data":{"recipientNickname":"ali","message":"is the websocat messaging test working?"}}
+
+{"action":"sendMessage","data":{"recipientNickname":"ali","message":"this is the first message from ibrahim"}}
