@@ -52,6 +52,7 @@ provider:
             - "dynamodb:GetItem"
             - "dynamodb:DeleteItem"
             - "dynamodb:Scan"
+            - "dynamodb:UpdateItem"
           Resource:
             - { "Fn::GetAtt": ["MessagesTable", "Arn"] }
         - Effect: Allow
@@ -96,6 +97,10 @@ functions:
           route: getClients
       - websocket:
           route: getMessages
+      - websocket:
+          route: typing
+      - websocket:
+          route: markRead
 
 
 
