@@ -21,6 +21,9 @@ provider:
           - ".amazonaws.com/${sls:stage}"
     CLIENTS_TABLE: Clients
     MESSAGES_TABLE: Messages
+    USERS_TABLE: Users
+    COGNITO_USER_POOL_ID: { Ref: UserPool }
+    COGNITO_CLIENT_ID: { Ref: UserPoolClient }
   # Uncomment to easily set up a custom domain. Read the docs for more details:
   # https://www.serverless.com/framework/docs/providers/aws/guide/domains
   # domain: api.example.com
@@ -64,6 +67,21 @@ provider:
               - - { "Fn::GetAtt": ["MessagesTable", "Arn"] }
                 - "index"
                 - "*"
+        - Effect: Allow
+          Action:
+            - "dynamodb:PutItem"
+            - "dynamodb:GetItem"
+          Resource:
+            - { "Fn::GetAtt": ["UsersTable", "Arn"] }
+        - Effect: Allow
+          Action:
+            - "dynamodb:Query"
+          Resource:
+            Fn::Join:
+              - "/"
+              - - { "Fn::GetAtt": ["UsersTable", "Arn"] }
+                - "index"
+                - "*"
         # Permissions for API Gateway Management API to send messages back to clients
         - Effect: Allow
           Action:
@@ -82,11 +100,18 @@ provider:
                 - "/*"
 
 functions:
+  wsAuthorizer:
+    handler: authorizer.handle
+
   websocketHandler:
     handler: handler.handle
     events:
       - websocket:
           route: $connect
+          authorizer:
+            name: wsAuthorizer
+            identitySource:
+              - "route.request.querystring.token"
       - websocket:
           route: $disconnect
       - websocket:
@@ -95,6 +120,8 @@ functions:
           route: sendMessage
       - websocket:
           route: getClients
+      - websocket:
+          route: getSession
       - websocket:
           route: getMessages
       - websocket:
@@ -156,8 +183,54 @@ resources:
             Projection:
               ProjectionType: "ALL"
 
+    UsersTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: Users
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: sub
+            AttributeType: S
+          - AttributeName: nickname
+            AttributeType: S
+        KeySchema:
+          - AttributeName: sub
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: NicknameIndex
+            KeySchema:
+              - AttributeName: nickname
+                KeyType: HASH
+            Projection:
+              ProjectionType: "ALL"
+
+    UserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: real-time-chat-users
+        UsernameAttributes: [email]
+        AutoVerifiedAttributes: [email]
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 8
+            RequireLowercase: true
+            RequireUppercase: true
+            RequireNumbers: true
+
+    UserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: real-time-chat-mobile
+        UserPoolId: { Ref: UserPool }
+        GenerateSecret: false
+        ExplicitAuthFlows:
+          - ALLOW_USER_PASSWORD_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+          - ALLOW_USER_SRP_AUTH
+
     ChatMediaBucket:
       Type: AWS::S3::Bucket
+      Properties: {}
 
 build:
   esbuild:
