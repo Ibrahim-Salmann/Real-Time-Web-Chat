@@ -38,6 +38,7 @@ provider:
             - "dynamodb:GetItem"
             - "dynamodb:DeleteItem"
             - "dynamodb:Scan"
+            - "dynamodb:UpdateItem"
           Resource:
             - { "Fn::GetAtt": ["ClientsTable", "Arn"] }
         - Effect: Allow
@@ -71,6 +72,7 @@ provider:
           Action:
             - "dynamodb:PutItem"
             - "dynamodb:GetItem"
+            - "dynamodb:UpdateItem"
           Resource:
             - { "Fn::GetAtt": ["UsersTable", "Arn"] }
         - Effect: Allow
@@ -122,6 +124,8 @@ functions:
           route: getClients
       - websocket:
           route: getSession
+      - websocket:
+          route: updateNickname
       - websocket:
           route: getMessages
       - websocket:

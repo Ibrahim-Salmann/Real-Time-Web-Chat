@@ -17,6 +17,7 @@ type APIGatewayRouteKey =
   | 'getMessages'
   | 'getClients'
   | 'getSession'
+  | 'updateNickname'
   | 'typing'
   | 'markRead';
 
@@ -25,6 +26,7 @@ type ClientMessageAction =
   | 'getMessages'
   | 'getClients'
   | 'getSession'
+  | 'updateNickname'
   | 'typing'
   | 'markRead';
 
@@ -78,6 +80,10 @@ type TypingBody = {
 
 type MarkReadBody = {
   chatKey: string;
+};
+
+type UpdateNicknameBody = {
+  nickname: string;
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -136,6 +142,7 @@ export const handle = async (
       case 'getMessages':
       case 'getClients':
       case 'getSession':
+      case 'updateNickname':
       case 'typing':
       case 'markRead':
         return await handleDefaultRoute(connectionId, event.body);
@@ -161,7 +168,7 @@ const handleDefaultRoute = async (
 
   try {
     const parsed = JSON.parse(bodyString || '{}') as Record<string, unknown>;
-    const valid: ClientMessageAction[] = ['sendMessage', 'getMessages', 'getClients', 'getSession', 'typing', 'markRead'];
+    const valid: ClientMessageAction[] = ['sendMessage', 'getMessages', 'getClients', 'getSession', 'updateNickname', 'typing', 'markRead'];
     if (typeof parsed.action !== 'string' || !valid.includes(parsed.action as ClientMessageAction)) {
       throw new HandlerError(parsed.action ? `Unknown action: ${parsed.action}` : 'Missing "action" field');
     }
@@ -183,6 +190,8 @@ const handleDefaultRoute = async (
       return handleGetClients(connectionId);
     case 'getSession':
       return handleGetSession(client!);
+    case 'updateNickname':
+      return handleUpdateNickname(client!, msg.data);
     case 'typing':
       return handleTyping(client!, msg.data);
     case 'markRead':
@@ -409,6 +418,76 @@ const handleGetSession = async (client: Client): Promise<APIGatewayProxyResult> 
     client.connectionId,
     JSON.stringify({ type: 'session', payload: { nickname: client.nickname, sub: client.sub } })
   );
+  return { statusCode: 200, body: '' };
+};
+
+// ─── updateNickname ───────────────────────────────────────────────────────────
+
+/**
+ * Renames the caller's display name. Note this does NOT migrate chat
+ * history: `Messages`/`Clients` are keyed by the literal nickname string
+ * (see `NicknameToNicknameIndex`), so existing threads under the old name
+ * stay put under that name — a deliberate, accepted trade-off for shipping
+ * this quickly rather than re-keying everything off `sub`.
+ *
+ * Unlike most other actions here, failures are reported back to the caller
+ * explicitly via `action_error` instead of throwing `HandlerError` — a
+ * thrown HandlerError's `{statusCode:400,...}` return value is never
+ * delivered to a WS client on a non-$connect route (API Gateway doesn't
+ * forward it), so silently throwing here would leave the UI hanging with
+ * no way to know the rename failed.
+ */
+const handleUpdateNickname = async (client: Client, data: unknown): Promise<APIGatewayProxyResult> => {
+  const { nickname: requested } = parseUpdateNicknameBody(data);
+
+  const respondError = (message: string) =>
+    postToConnection(
+      client.connectionId,
+      JSON.stringify({ type: 'action_error', payload: { action: 'updateNickname', message } })
+    );
+
+  if (!NICKNAME_RE.test(requested)) {
+    await respondError('Letters, numbers, underscores, and hyphens only — no spaces.');
+    return { statusCode: 200, body: '' };
+  }
+
+  if (requested === client.nickname) {
+    // No-op rename — just re-confirm the (unchanged) session, no writes needed.
+    await postToConnection(
+      client.connectionId,
+      JSON.stringify({ type: 'session', payload: { nickname: client.nickname, sub: client.sub } })
+    );
+    return { statusCode: 200, body: '' };
+  }
+
+  const existing = await getUserByNickname(requested);
+  if (existing && existing.sub !== client.sub) {
+    await respondError(`'${sanitizeLog(requested)}' is already taken.`);
+    return { statusCode: 200, body: '' };
+  }
+
+  await docClient.update({
+    TableName: USERS_TABLE,
+    Key: { sub: client.sub },
+    UpdateExpression: 'SET nickname = :n',
+    ExpressionAttributeValues: { ':n': requested },
+  }).promise();
+
+  await docClient.update({
+    TableName: CLIENTS_TABLE,
+    Key: { connectionId: client.connectionId },
+    UpdateExpression: 'SET nickname = :n',
+    ExpressionAttributeValues: { ':n': requested },
+  }).promise();
+
+  console.info(`[updateNickname] sub=${sanitizeLog(client.sub)} ${sanitizeLog(client.nickname)} -> ${sanitizeLog(requested)}`);
+
+  await postToConnection(
+    client.connectionId,
+    JSON.stringify({ type: 'session', payload: { nickname: requested, sub: client.sub } })
+  );
+  await notifyClientChange(client.connectionId);
+
   return { statusCode: 200, body: '' };
 };
 
@@ -720,4 +799,12 @@ const parseMarkReadBody = (data: unknown): MarkReadBody => {
   if (typeof d['chatKey'] !== 'string' || !CHAT_KEY_RE.test(d['chatKey'] as string))
     throw new HandlerError('chatKey must be in "NicknameA#NicknameB" format');
   return data as MarkReadBody;
+};
+
+const parseUpdateNicknameBody = (data: unknown): UpdateNicknameBody => {
+  if (!data || typeof data !== 'object') throw new HandlerError('Missing updateNickname payload');
+  const d = data as Record<string, unknown>;
+  if (typeof d['nickname'] !== 'string' || !d['nickname'].trim())
+    throw new HandlerError('nickname is required');
+  return { nickname: (d['nickname'] as string).trim() };
 };
