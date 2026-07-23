@@ -24,6 +24,7 @@ provider:
     USERS_TABLE: Users
     COGNITO_USER_POOL_ID: { Ref: UserPool }
     COGNITO_CLIENT_ID: { Ref: UserPoolClient }
+    CHAT_MEDIA_BUCKET: { Ref: ChatMediaBucket }
   # Uncomment to easily set up a custom domain. Read the docs for more details:
   # https://www.serverless.com/framework/docs/providers/aws/guide/domains
   # domain: api.example.com
@@ -84,6 +85,16 @@ provider:
               - - { "Fn::GetAtt": ["UsersTable", "Arn"] }
                 - "index"
                 - "*"
+        - Effect: Allow
+          Action:
+            - "s3:PutObject"
+            - "s3:GetObject"
+            - "s3:DeleteObject"
+          Resource:
+            Fn::Join:
+              - ""
+              - - { "Fn::GetAtt": ["ChatMediaBucket", "Arn"] }
+                - "/*"
         # Permissions for API Gateway Management API to send messages back to clients
         - Effect: Allow
           Action:
@@ -132,6 +143,12 @@ functions:
           route: typing
       - websocket:
           route: markRead
+      - websocket:
+          route: getUploadUrl
+      - websocket:
+          route: getMediaUrl
+      - websocket:
+          route: deleteMessage
 
 
 

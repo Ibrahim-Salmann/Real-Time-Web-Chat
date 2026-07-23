@@ -6,6 +6,7 @@ import {
 } from 'aws-lambda';
 import AWS, { AWSError } from 'aws-sdk';
 import { v4 } from 'uuid';
+import { getUploadUrl as getS3UploadUrl, getMediaUrl as getS3MediaUrl, deleteMedia } from './s3';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -19,7 +20,10 @@ type APIGatewayRouteKey =
   | 'getSession'
   | 'updateNickname'
   | 'typing'
-  | 'markRead';
+  | 'markRead'
+  | 'getUploadUrl'
+  | 'getMediaUrl'
+  | 'deleteMessage';
 
 type ClientMessageAction =
   | 'sendMessage'
@@ -28,7 +32,10 @@ type ClientMessageAction =
   | 'getSession'
   | 'updateNickname'
   | 'typing'
-  | 'markRead';
+  | 'markRead'
+  | 'getUploadUrl'
+  | 'getMediaUrl'
+  | 'deleteMessage';
 
 /**
  * Message Echo Strategy: Option B — sender does NOT receive a message echo.
@@ -62,9 +69,37 @@ type ClientMessage = {
   data?: unknown;
 };
 
+type AttachmentMeta = {
+  key: string;
+  contentType: string;
+  fileSize: number;
+  width?: number;
+  height?: number;
+  duration?: number;
+  fileName?: string;
+};
+
 type SendMessageBody = {
   recipientNickname: string;
   message: string;
+  attachment?: AttachmentMeta;
+};
+
+type GetUploadUrlBody = {
+  requestId: string;
+  contentType: string;
+  fileSize: number;
+};
+
+type GetMediaUrlBody = {
+  requestId: string;
+  key: string;
+};
+
+type DeleteMessageBody = {
+  chatKey: string;
+  messageId: string;
+  createdAt: number;
 };
 
 type GetMessagesBody = {
@@ -95,6 +130,32 @@ const MAX_MESSAGE_LENGTH = 2000;
 const NICKNAME_RE = /^[a-zA-Z0-9_-]{1,32}$/;
 const CHAT_KEY_RE = /^[a-zA-Z0-9_-]{1,32}#[a-zA-Z0-9_-]{1,32}$/;
 const CLIENT_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10MB — matches the mobile client's config.limits.maxFileSize
+
+// Extension used for the generated S3 key — also doubles as the content-type
+// allowlist (anything not in this map is rejected in handleGetUploadUrl).
+const EXTENSION_BY_CONTENT_TYPE: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/heic': 'heic',
+  'image/gif': 'gif',
+  'audio/m4a': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'audio/mp4': 'm4a',
+  'audio/aac': 'aac',
+  'audio/mpeg': 'mp3',
+  'audio/wav': 'wav',
+  'application/pdf': 'pdf',
+  'text/plain': 'txt',
+  'application/msword': 'doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+  'application/zip': 'zip',
+  'application/json': 'json',
+  'application/octet-stream': 'bin',
+};
 
 // ─── AWS Clients ──────────────────────────────────────────────────────────────
 
@@ -145,6 +206,9 @@ export const handle = async (
       case 'updateNickname':
       case 'typing':
       case 'markRead':
+      case 'getUploadUrl':
+      case 'getMediaUrl':
+      case 'deleteMessage':
         return await handleDefaultRoute(connectionId, event.body);
       default:
         return { statusCode: 400, body: JSON.stringify({ message: 'Unknown route' }) };
@@ -168,7 +232,7 @@ const handleDefaultRoute = async (
 
   try {
     const parsed = JSON.parse(bodyString || '{}') as Record<string, unknown>;
-    const valid: ClientMessageAction[] = ['sendMessage', 'getMessages', 'getClients', 'getSession', 'updateNickname', 'typing', 'markRead'];
+    const valid: ClientMessageAction[] = ['sendMessage', 'getMessages', 'getClients', 'getSession', 'updateNickname', 'typing', 'markRead', 'getUploadUrl', 'getMediaUrl', 'deleteMessage'];
     if (typeof parsed.action !== 'string' || !valid.includes(parsed.action as ClientMessageAction)) {
       throw new HandlerError(parsed.action ? `Unknown action: ${parsed.action}` : 'Missing "action" field');
     }
@@ -196,6 +260,12 @@ const handleDefaultRoute = async (
       return handleTyping(client!, msg.data);
     case 'markRead':
       return handleMarkRead(client!, msg.data);
+    case 'getUploadUrl':
+      return handleGetUploadUrl(client!, msg.data);
+    case 'getMediaUrl':
+      return handleGetMediaUrl(client!, msg.data);
+    case 'deleteMessage':
+      return handleDeleteMessage(client!, msg.data);
     default:
       throw new HandlerError('Unhandled action');
   }
@@ -342,7 +412,15 @@ const handleSendMessage = async (client: Client, data: unknown): Promise<APIGate
       recipientConnectionId,
       JSON.stringify({
         type: 'message',
-        payload: { messageId, chatKey, sender: client.nickname, message: sanitized, createdAt, status: 'delivered' },
+        payload: {
+          messageId,
+          chatKey,
+          sender: client.nickname,
+          message: sanitized,
+          createdAt,
+          status: 'delivered',
+          ...(body.attachment ? { attachment: body.attachment } : {}),
+        },
       })
     );
     if (delivered) status = 'delivered';
@@ -351,7 +429,15 @@ const handleSendMessage = async (client: Client, data: unknown): Promise<APIGate
   // ── Persist with resolved status ──────────────────────────────────────────
   await docClient.put({
     TableName: MESSAGES_TABLE,
-    Item: { messageId, nicknameToNickname: chatKey, message: sanitized, sender: client.nickname, createdAt, status },
+    Item: {
+      messageId,
+      nicknameToNickname: chatKey,
+      message: sanitized,
+      sender: client.nickname,
+      createdAt,
+      status,
+      ...(body.attachment ? { attachment: body.attachment } : {}),
+    },
   }).promise();
 
   // ── Notify sender of status only (no echo) ────────────────────────────────
@@ -619,6 +705,124 @@ const handleMarkRead = async (client: Client, data: unknown): Promise<APIGateway
   return { statusCode: 200, body: '' };
 };
 
+// ─── getUploadUrl ─────────────────────────────────────────────────────────────
+
+/**
+ * Presigned S3 PUT for a client to upload an image/audio/file attachment
+ * directly — the bytes never pass through this Lambda, avoiding the WS
+ * frame's implicit size limits. `requestId` round-trips a client-generated
+ * id so the response can be matched to the right in-flight request; nothing
+ * else in this protocol needs request/response correlation today.
+ */
+const handleGetUploadUrl = async (client: Client, data: unknown): Promise<APIGatewayProxyResult> => {
+  const body = parseGetUploadUrlBody(data);
+  const ext = EXTENSION_BY_CONTENT_TYPE[body.contentType];
+
+  if (!ext) {
+    throw new HandlerError(`Unsupported contentType: ${body.contentType}`);
+  }
+  if (body.fileSize > MAX_ATTACHMENT_BYTES) {
+    throw new HandlerError(`fileSize exceeds ${MAX_ATTACHMENT_BYTES} bytes`);
+  }
+
+  const key = `chat-media/${client.sub}/${v4()}.${ext}`;
+  const uploadUrl = await getS3UploadUrl(key, body.contentType);
+
+  await postToConnection(
+    client.connectionId,
+    JSON.stringify({ type: 'uploadUrl', payload: { requestId: body.requestId, uploadUrl, key } })
+  );
+
+  return { statusCode: 200, body: '' };
+};
+
+// ─── getMediaUrl ──────────────────────────────────────────────────────────────
+
+/**
+ * Presigned S3 GET for viewing/downloading a previously-uploaded attachment.
+ * MVP trusts key-opacity (UUID-named keys under a per-sub prefix aren't
+ * enumerable) rather than cross-checking the requester is a real
+ * participant in the message that references this key — accepted gap, not
+ * a hardening pass for this iteration.
+ */
+const handleGetMediaUrl = async (client: Client, data: unknown): Promise<APIGatewayProxyResult> => {
+  const body = parseGetMediaUrlBody(data);
+  const url = await getS3MediaUrl(body.key);
+
+  await postToConnection(
+    client.connectionId,
+    JSON.stringify({ type: 'mediaUrl', payload: { requestId: body.requestId, key: body.key, url } })
+  );
+
+  return { statusCode: 200, body: '' };
+};
+
+// ─── deleteMessage ────────────────────────────────────────────────────────────
+
+/**
+ * Deletes one of the caller's own sent messages. Scoped to "delete for
+ * everyone" on your own messages only — there's no "delete for me"/hide-only
+ * variant, and you can never delete someone else's message (enforced by
+ * fetching the real item and checking `sender` server-side, never trusting
+ * a client-asserted owner).
+ *
+ * No ack is sent back to the caller — same fire-and-forget shape as
+ * `typing`/`markRead` elsewhere in this file. The sender's own client
+ * removes the message from its local view optimistically when it issues
+ * the delete; the *other* participant learns about it via the
+ * `message_deleted` push below.
+ */
+const handleDeleteMessage = async (client: Client, data: unknown): Promise<APIGatewayProxyResult> => {
+  const body = parseDeleteMessageBody(data);
+
+  const existing = await docClient.get({
+    TableName: MESSAGES_TABLE,
+    Key: { messageId: body.messageId, createdAt: body.createdAt },
+  }).promise();
+
+  // Already gone (e.g. a duplicate/retried delete) — treat as success rather
+  // than erroring on an already-satisfied request.
+  if (!existing.Item) return { statusCode: 200, body: '' };
+
+  const item = existing.Item as { sender: string; nicknameToNickname: string; attachment?: AttachmentMeta };
+
+  if (item.sender !== client.nickname) {
+    throw new HandlerError('You can only delete your own messages');
+  }
+  if (item.nicknameToNickname !== body.chatKey) {
+    throw new HandlerError('chatKey does not match this message');
+  }
+
+  await docClient.delete({
+    TableName: MESSAGES_TABLE,
+    Key: { messageId: body.messageId, createdAt: body.createdAt },
+  }).promise();
+
+  if (item.attachment?.key) {
+    // Best-effort — an orphaned S3 object is a cleanup nit, not worth
+    // failing the (already-succeeded) message delete over.
+    await deleteMedia(item.attachment.key).catch((e) =>
+      console.error('[deleteMessage] Failed to delete S3 object:', sanitizeLog(item.attachment!.key), (e as Error).message)
+    );
+  }
+
+  const [partA, partB] = body.chatKey.split('#');
+  const otherNickname = partA === client.nickname ? partB : partA;
+  if (otherNickname) {
+    const otherConnectionId = await getConnectionIdByNickname(otherNickname);
+    if (otherConnectionId) {
+      await postToConnection(
+        otherConnectionId,
+        JSON.stringify({ type: 'message_deleted', payload: { messageId: body.messageId, chatKey: body.chatKey } })
+      ).catch(() => {
+        // Stale recipient: postToConnection already cleaned up the record.
+      });
+    }
+  }
+
+  return { statusCode: 200, body: '' };
+};
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
@@ -752,6 +956,36 @@ const notifyClientChange = async (excludedConnectionId = ''): Promise<void> => {
 
 // ─── Validators ───────────────────────────────────────────────────────────────
 
+const parseAttachment = (value: unknown): AttachmentMeta | undefined => {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object') throw new HandlerError('attachment must be an object');
+  const a = value as Record<string, unknown>;
+  if (typeof a['key'] !== 'string' || !a['key'].startsWith('chat-media/') || a['key'].includes('..'))
+    throw new HandlerError('Invalid attachment key');
+  if (typeof a['contentType'] !== 'string' || !EXTENSION_BY_CONTENT_TYPE[a['contentType']])
+    throw new HandlerError('Invalid attachment contentType');
+  if (typeof a['fileSize'] !== 'number' || !Number.isInteger(a['fileSize']) || a['fileSize'] <= 0 || a['fileSize'] > MAX_ATTACHMENT_BYTES)
+    throw new HandlerError('Invalid attachment fileSize');
+  const attachment: AttachmentMeta = { key: a['key'], contentType: a['contentType'], fileSize: a['fileSize'] };
+  if (a['width'] !== undefined) {
+    if (typeof a['width'] !== 'number') throw new HandlerError('attachment.width must be a number');
+    attachment.width = a['width'];
+  }
+  if (a['height'] !== undefined) {
+    if (typeof a['height'] !== 'number') throw new HandlerError('attachment.height must be a number');
+    attachment.height = a['height'];
+  }
+  if (a['duration'] !== undefined) {
+    if (typeof a['duration'] !== 'number') throw new HandlerError('attachment.duration must be a number');
+    attachment.duration = a['duration'];
+  }
+  if (a['fileName'] !== undefined) {
+    if (typeof a['fileName'] !== 'string') throw new HandlerError('attachment.fileName must be a string');
+    attachment.fileName = a['fileName'].slice(0, 256);
+  }
+  return attachment;
+};
+
 const parseSendMessageBody = (data: unknown): SendMessageBody => {
   if (!data || typeof data !== 'object') throw new HandlerError('Missing sendMessage payload');
   const d = data as Record<string, unknown>;
@@ -759,11 +993,54 @@ const parseSendMessageBody = (data: unknown): SendMessageBody => {
     throw new HandlerError('recipientNickname is required');
   if (!NICKNAME_RE.test(d['recipientNickname'] as string))
     throw new HandlerError('Invalid recipientNickname format');
-  if (typeof d['message'] !== 'string' || !d['message'].trim())
-    throw new HandlerError('message is required and cannot be empty');
-  if ((d['message'] as string).length > MAX_MESSAGE_LENGTH)
+
+  const attachment = parseAttachment(d['attachment']);
+  const message = typeof d['message'] === 'string' ? d['message'] : '';
+  if (!message.trim() && !attachment) {
+    throw new HandlerError('message or attachment is required');
+  }
+  if (message.length > MAX_MESSAGE_LENGTH) {
     throw new HandlerError(`message exceeds ${MAX_MESSAGE_LENGTH} characters`);
-  return data as SendMessageBody;
+  }
+  return {
+    recipientNickname: d['recipientNickname'] as string,
+    message,
+    ...(attachment ? { attachment } : {}),
+  };
+};
+
+const parseGetUploadUrlBody = (data: unknown): GetUploadUrlBody => {
+  if (!data || typeof data !== 'object') throw new HandlerError('Missing getUploadUrl payload');
+  const d = data as Record<string, unknown>;
+  if (typeof d['requestId'] !== 'string' || !d['requestId'].trim())
+    throw new HandlerError('requestId is required');
+  if (typeof d['contentType'] !== 'string' || !d['contentType'].trim())
+    throw new HandlerError('contentType is required');
+  if (typeof d['fileSize'] !== 'number' || !Number.isInteger(d['fileSize']) || d['fileSize'] <= 0)
+    throw new HandlerError('fileSize must be a positive integer');
+  return { requestId: d['requestId'], contentType: d['contentType'], fileSize: d['fileSize'] };
+};
+
+const parseDeleteMessageBody = (data: unknown): DeleteMessageBody => {
+  if (!data || typeof data !== 'object') throw new HandlerError('Missing deleteMessage payload');
+  const d = data as Record<string, unknown>;
+  if (typeof d['chatKey'] !== 'string' || !CHAT_KEY_RE.test(d['chatKey'] as string))
+    throw new HandlerError('chatKey must be in "NicknameA#NicknameB" format');
+  if (typeof d['messageId'] !== 'string' || !d['messageId'].trim())
+    throw new HandlerError('messageId is required');
+  if (typeof d['createdAt'] !== 'number' || !Number.isInteger(d['createdAt']))
+    throw new HandlerError('createdAt must be an integer');
+  return { chatKey: d['chatKey'], messageId: d['messageId'], createdAt: d['createdAt'] };
+};
+
+const parseGetMediaUrlBody = (data: unknown): GetMediaUrlBody => {
+  if (!data || typeof data !== 'object') throw new HandlerError('Missing getMediaUrl payload');
+  const d = data as Record<string, unknown>;
+  if (typeof d['requestId'] !== 'string' || !d['requestId'].trim())
+    throw new HandlerError('requestId is required');
+  if (typeof d['key'] !== 'string' || !d['key'].startsWith('chat-media/') || d['key'].includes('..'))
+    throw new HandlerError('Invalid key');
+  return { requestId: d['requestId'], key: d['key'] };
 };
 
 const parseGetMessageBody = (data: unknown): GetMessagesBody => {
